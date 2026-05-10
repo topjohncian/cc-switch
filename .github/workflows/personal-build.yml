@@ -1,0 +1,90 @@
+name: Personal Unsigned Windows Build
+
+on:
+  push:
+    tags:
+      - 'personal-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build unsigned Windows app
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.12.3
+          run_install: false
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-store-
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Write unsigned Tauri config overlay
+        shell: bash
+        run: |
+          cat > src-tauri/tauri.unsigned.conf.json <<'EOF'
+          {
+            "$schema": "https://schema.tauri.app/config/2",
+            "bundle": {
+              "createUpdaterArtifacts": false
+            }
+          }
+          EOF
+
+      - name: Build unsigned app
+        run: pnpm tauri build --config src-tauri/tauri.unsigned.conf.json
+
+      - name: Collect Windows artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path personal-build | Out-Null
+          Get-ChildItem -Path 'src-tauri/target/release/bundle' -Recurse -Include *.msi,*.exe -ErrorAction SilentlyContinue |
+            Copy-Item -Destination personal-build -Force
+          if (Test-Path 'src-tauri/target/release/cc-switch.exe') {
+            New-Item -ItemType Directory -Force -Path personal-build/portable | Out-Null
+            Copy-Item 'src-tauri/target/release/cc-switch.exe' personal-build/portable -Force
+            Set-Content -Path personal-build/portable/portable.ini -Value 'portable=true' -Encoding UTF8
+            Compress-Archive -Path personal-build/portable/* -DestinationPath personal-build/CC-Switch-Windows-Portable.zip -Force
+            Remove-Item -Recurse -Force personal-build/portable
+          }
+          Get-ChildItem personal-build
+
+      - name: Upload unsigned artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: cc-switch-windows-unsigned-${{ github.sha }}
+          path: personal-build/*
+          if-no-files-found: error
